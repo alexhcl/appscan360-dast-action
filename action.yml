@@ -1,0 +1,168 @@
+# Copyright 2023, 2024 HCL America
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: HCL AppScan DAST Analyzer
+description: 'Scan for security issues in web applications'
+branding:
+  icon: check-circle
+  color: blue
+inputs:
+  baseurl:
+    description: 'baseURL of ASOC API'
+    required: true
+    default: 'https://cloud.appscan.com'
+  scan_id:
+    description: 'RESCAN MODE: ID of an existing scan on the server. When set, the action triggers a new execution of that scan (reusing its stored configuration, target and login) instead of creating a new scan. Scan-creation inputs (scan file/template, starting_URL, login_*) are ignored. Results, reports and security gates work the same as for a new scan.'
+    required: false
+    default: ''
+  asoc_key:
+    description: 'API key for connecting to ASoC.'
+    required: true
+  asoc_secret:
+    description: 'Secret for connecting to ASoC.'
+    required: true
+  application_id:
+    description: 'The ASoC application id where your scan will appear.'
+    required: true
+  scan_name:
+    description: 'The name of the scan created in ASoC.'
+    required: false
+  #scan_type:
+  # description: 'The type of scan - staging or production'
+  # required: false
+  # default: 'staging'
+  
+  #dast or scan file
+  dynamic_scan_type: 
+    description: 'Choose between dast or upload. DAST will require you to specify starting URL and login, while upload will only require you to specify a .scan or .scant file'
+    required: true
+    default: dast
+  scan_or_scant_file:
+    description: "If dynamic_scan_type is set to \"upload\", then you will need to provide the .scan or .scant file here"
+    required: false
+
+  #DAST starter config
+  starting_URL:
+    description: 'The starting URL of the DAST scan'
+    required: false
+    default: https://demo.testfire.net?mode=demo
+  login_method:
+    description: 'Login Method of the scan, can be none, userpass, or recorded'
+    required: false
+    default: 'none'
+  optimization:
+    description: 'Optimization level: NoOptimization, Fast, Faster, Fastest'
+    required: false
+    default: Fastest
+  
+  #NETWORK
+  network:
+    description: 'Set the type of network, if this is set to private, you must have AppScan Presence created in advance'
+    required: false
+    default: 'public'
+  presence_id:
+    description: 'Provide the appscan presence ID here'
+    required: false
+  ephemeral_presence:
+    description: 'If set to true, this action will deploy a ephemeral (temporary) instance of the AppScan Presence on the runner. Please take note that this will ignore presence_id and network settings, and will force set wait_for_analysis to true'
+    required: false
+    default: 'false'
+  
+  #BASIC LOGIN
+  login_user:
+    description: 'if login_method is userpass, provide the username here'
+    required: false
+  login_password:
+    description: 'if login_method is userpass, provide the password here'
+    required: false
+  #login_extra_field:
+  #  description: 'if login_method is userpass, provide optional 3rd login value'
+  #  required: false
+
+  #RECORDEDLOGIN
+  login_sequence_file:
+    description: 'Provide a path to the Login Traffic File data. Supported file type: CONFIG: AppScan Activity Recorder file'
+    required: false
+    
+  #misc settings
+  email_notification:
+    description: 'Send email notification upon scan completion'
+    required: false
+    default: 'false'
+
+  personal_scan:
+    description: 'set to personal scan'
+    required: false
+    default: 'false'
+  #intervention:
+  #  description: 'allow scan intervention'
+  #  required: false
+  #  default: 'false'
+
+  #Wait for analysis settings
+  wait_for_analysis:
+    description: 'Set this true to wait for analysis to complete before finishing job.'
+    required: true
+    default: 'true'
+
+  wait_for_analysis_timeout_minutes:
+    description: 'maximum duration in minutes before the job will no longer wait and proceeds to complete, default is 360 (6 hours)'
+    required: false
+    default: '360'
+  
+  #fail build settings
+  fail_for_noncompliance:
+    description: 'If **fail_for_noncompliance** = true, fail the job if any non-compliant issues are found in the scan'
+    required: false
+    default: 'false'
+  fail_by_severity:
+    description: 'If **fail_by_severity** is set to true, failure_threshold must also be set. This will fail the job if any issues equal to or higher (more severe) than failure_threshold are found in the scan.'
+    required: false
+    default: 'false'
+  failure_threshold:
+    description: 'If **fail_for_noncompliance** is enabled, the severity that indicates a failure. Lesser severities will not be considered a failure. For example, if failure_threshold is set to Medium, Informational and/or Low severity issues will not cause a failure. Medium, High, and/or Critical issues will cause a failure.	'
+    required: false
+    default: 'High'
+
+outputs:
+  scan_id:
+    description: 'ID of the scan created on the AppScan server.'
+  execution_id:
+    description: 'ID of the scan execution started by this job (set in rescan mode).'
+  scan_url:
+    description: 'Direct link to the scan view in the AppScan portal.'
+  scan_status:
+    description: 'Final scan status observed by the job: Ready, Failed, Stopped, TimedOut (...), or Running when wait_for_analysis=false.'
+  report_file:
+    description: 'Filename (in the job workspace) of the downloaded HTML security report. Only set when wait_for_analysis=true and the scan completes.'
+  total_issues:
+    description: 'Total number of open issues found by the scan.'
+  critical_count:
+    description: 'Number of open Critical severity issues.'
+  high_count:
+    description: 'Number of open High severity issues.'
+  medium_count:
+    description: 'Number of open Medium severity issues.'
+  low_count:
+    description: 'Number of open Low severity issues.'
+  informational_count:
+    description: 'Number of open Informational severity issues.'
+  gate_result:
+    description: 'Security gate verdict: passed, failed, not_configured (no gate inputs enabled), not_evaluated (wait_for_analysis=false), or error (scan failed/timed out).'
+
+runs:
+  using: 'node20'
+  main: 'main.js'
+  post: 'cancelJob.js'
+  post-if: cancelled()
