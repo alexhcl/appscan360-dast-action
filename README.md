@@ -520,23 +520,91 @@ python scripts\appscan_dast.py --base-url https://ascp.appscan.local `
 
 ### Running it in a GitHub workflow
 
-A **self-hosted runner that runs as a Windows service** uses the service account's PATH, which usually does **not** include an interactively-installed Python — so `python`/`python3` fails with *"Python was not found."* Use `actions/setup-python` to provide Python regardless of the account:
+The Python client is a **standalone alternative** to the PowerShell action — it does the whole create/wait/report/gate itself, so you run it from a plain `python` step, not from `post_scan_command`. Copy `scripts/appscan_dast.py` into the repo that runs the workflow so `actions/checkout` makes it available.
+
+Two notes for self-hosted runners:
+- A runner running as a **Windows service** uses the service account's PATH, which usually has no usable Python (`python`/`python3` → *"Python was not found."*). `actions/setup-python` provides one regardless of the account.
+- Use `shell: pwsh`, **not** `shell: bash` — Windows runners have no `bash` (PowerShell 7 is already required by the action).
+
+Complete workflow showing **both modes** (a `mode` dropdown; the nightly schedule forces sync):
 
 ```yaml
+name: "AppScan DAST (Python client)"
+run-name: "AppScan DAST · ${{ github.event_name == 'schedule' && 'sync' || inputs.mode }}"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'            # nightly, always sync
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'sync = wait + gate + report · async = start and exit'
+        type: choice
+        options: [sync, async]
+        default: sync
+      fail_on:
+        description: '(sync) fail the job on open issues at/above this severity'
+        type: choice
+        options: [Critical, High, Medium, Low, Informational]
+        default: High
+
+concurrency:
+  group: appscan-dast-python
+  cancel-in-progress: false
+
+jobs:
+  dast:
+    runs-on: [self-hosted, windows]   # match your runner's labels
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4     # brings scripts/appscan_dast.py into the workspace
       - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - name: AppScan DAST (sync)
+        with:
+          python-version: '3.12'
+
+      - name: AppScan 360 DAST
+        id: scan
+        shell: pwsh                   # pwsh (not bash) — Windows runners have no bash
         env:
           ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
           ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
-        run: >
-          python scripts/appscan_dast.py
-          --base-url ${{ vars.APPSCAN_URL }}
-          --app-id ${{ vars.APPSCAN_APP_ID }}
-          --rescan-latest --mode sync --fail-on High --insecure
+        run: |
+          # Scheduled runs have no inputs -> force sync + High gate.
+          $mode   = if ('${{ github.event_name }}' -eq 'schedule') { 'sync' } else { '${{ inputs.mode }}' }
+          $failOn = if ('${{ github.event_name }}' -eq 'schedule') { 'High' } else { '${{ inputs.fail_on }}' }
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' `
+            --app-id   '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest `
+            --mode $mode `
+            --fail-on $failOn `
+            --report-file "AppScan_Security_Report-${{ github.run_number }}.html" `
+            --insecure
+          # Exit code becomes the step result (pwsh fails the step on non-zero):
+          #   0 ok (async started / sync passed) · 1 gate failed · 2 scan Failed/Stopped
+          #   3 timeout · 4 API/connection error
+
+      # Only sync produces a report; async exits before one exists.
+      - name: Upload security report
+        if: (success() || failure()) && (github.event_name == 'schedule' || inputs.mode == 'sync')
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-report-${{ github.run_number }}
+          path: 'AppScan_Security_Report-*.html'
+          if-no-files-found: ignore
 ```
 
-Switch `--mode sync` → `--mode async` for fire-and-forget. The Python client is a **standalone alternative** to the PowerShell action (it does the whole create/wait/report/gate itself) — it is *not* meant to be called from `post_scan_command`.
+**sync vs async at a glance:**
+
+| | `--mode sync` (default) | `--mode async` |
+|---|---|---|
+| Waits for the scan | yes — polls every 30s to `Ready`/`Failed`/timeout | no — exits right after starting it |
+| Downloads the report | yes (`--report-file`) | no |
+| Applies the `--fail-on` gate | yes (exit 1 on findings at/above) | no (flag ignored) |
+| Runner held for | the whole scan (minutes–hours) | seconds |
+| Use it for | CI gates, nightly scans you act on | fire-and-forget kick-offs; collect later via monitor/portal |
+
+For a brand-new scan instead of a rescan, drop `--rescan-latest` and add `--starting-url 'https://staging.yourapp.com'`. `--insecure` is the client's equivalent of `ACCEPTSSL` (skip TLS verification until the server CA is trusted).
 
 ## Troubleshooting
 
