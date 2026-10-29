@@ -1,0 +1,224 @@
+# Copyright 2023, 2024 HCL America
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: HCL AppScan DAST Analyzer
+description: 'Scan for security issues in web applications'
+branding:
+  icon: check-circle
+  color: blue
+inputs:
+  baseurl:
+    description: 'baseURL of AppScan 360 API'
+    required: true
+    default: 'https://your-appscan360-server'
+  github_token:
+    description: 'Token used by the post step to list this run''s artifacts and append DIRECT artifact download links to the job summary (needs actions: read). Defaults to the workflow''s own token. Set to an empty string to disable the Downloads section.'
+    required: false
+    default: ${{ github.token }}
+  scan_id:
+    description: 'Optional override for rescan mode: the ID of the specific scan to rescan. Only used when rescan_latest is true; ignored (with a warning) otherwise. Leave empty to let the action auto-resolve the most recent DAST scan of application_id.'
+    required: false
+    default: ''
+  rescan_latest:
+    description: 'THE rescan switch. When true, the action triggers a new execution of an existing scan instead of creating a new one: by default the most recent DAST scan of application_id (auto-resolved from the server), or the specific scan given in scan_id. The existing scan''s stored configuration, target and login are reused, and creation inputs (scan file/template, starting_URL, login_*) are ignored. If the application has no scan yet, falls back to creating a new scan so the first run bootstraps it. Results, reports and security gates work the same as for a new scan. Default: false (always create a new scan).'
+    required: false
+    default: false
+  post_scan_command:
+    description: 'A command to run after the DAST scan completes and results/gates are evaluated - e.g. a curl webhook call or "python3 scripts/notify.py". Executed via PowerShell on the runner, so shell tools (curl, python3) work as installed there. The scan context is exposed as environment variables: ASOC_SCAN_ID, ASOC_EXECUTION_ID, ASOC_SCAN_URL, ASOC_SCAN_NAME, ASOC_SCAN_STATUS, ASOC_REPORT_FILE, ASOC_TOTAL_ISSUES, ASOC_CRITICAL_COUNT, ASOC_HIGH_COUNT, ASOC_MEDIUM_COUNT, ASOC_LOW_COUNT, ASOC_INFORMATIONAL_COUNT, ASOC_GATE_RESULT, ASOC_BASE_URL, ASOC_APP_ID. Runs whether the gate passed or failed (the job exits after it); a failing command only warns and never changes the gate verdict. Requires wait_for_analysis: true; skipped (with a warning) for async runs, failed scans and timeouts.'
+    required: false
+    default: ''
+  scan_history:
+    description: 'Enabled by default: every scanning run appends a compact "Scan history" section to the job summary - the application''s past scans, newest first, with created date, name, ID, latest status and an Open-scan portal link per scan (the current run''s scan is marked). Links only, no report downloads - use monitor mode for filtering and reports. Set to false to turn the section off.'
+    required: false
+    default: true
+  scan_history_limit:
+    description: 'Maximum number of past scans shown in the Scan history section. Default: 15.'
+    required: false
+    default: 15
+  monitor:
+    description: 'MONITOR MODE. When true, the action does not scan: it lists past scans of application_id, filtered by monitor_from_date/monitor_to_date, monitor_scan_id and monitor_name_contains, renders them in the job summary with an Open-scan portal link per scan, and downloads each scan''s HTML report to the workspace (up to monitor_max_reports) for actions/upload-artifact. Only baseurl, credentials and application_id are needed; all scan inputs are ignored.'
+    required: false
+    default: false
+  monitor_from_date:
+    description: 'Monitor filter: only scans created on or after this date (yyyy-MM-dd).'
+    required: false
+    default: ''
+  monitor_to_date:
+    description: 'Monitor filter: only scans created on or before this date (yyyy-MM-dd, inclusive).'
+    required: false
+    default: ''
+  monitor_scan_id:
+    description: 'Monitor filter: only the scan with exactly this ID.'
+    required: false
+    default: ''
+  monitor_name_contains:
+    description: 'Monitor filter: only scans whose name contains this string (case-insensitive).'
+    required: false
+    default: ''
+  monitor_show_executions:
+    description: 'Monitor mode: also list each matched scan''s executions (execution ID, created, status) in an Executions table, for up to the 10 most recent matched scans. Default: true.'
+    required: false
+    default: true
+  monitor_max_reports:
+    description: 'Monitor mode: maximum TOTAL number of HTML reports to generate and download (newest first). By default one report per matched scan; with monitor_report_per_execution=true, one per execution. Default: 10.'
+    required: false
+    default: 10
+  monitor_report_per_execution:
+    description: 'Monitor mode (ENABLED BY DEFAULT): generate and download an HTML report for EACH execution of the matched scans. Reports are listed in the Executions table''s Report column and named AppScan_Monitor_Report-<scan>-exec-<executionId>.html, and monitor_max_reports caps the total number downloaded (newest scans first). Uses POST /api/v4/Reports/Security/ScanExecution/{id}. Set to false to get a single report per scan (its latest execution only) instead.'
+    required: false
+    default: true
+  asoc_key:
+    description: 'API key for connecting to AppScan 360.'
+    required: true
+  asoc_secret:
+    description: 'Secret for connecting to AppScan 360.'
+    required: true
+  application_id:
+    description: 'The AppScan 360 application id where your scan will appear.'
+    required: true
+  scan_name:
+    description: 'The name of the scan created in AppScan 360.'
+    required: false
+  #dast or scan file
+  dynamic_scan_type: 
+    description: 'Choose between dast or upload. DAST will require you to specify starting URL and login, while upload will only require you to specify a .scan or .scant file'
+    required: true
+    default: dast
+  scan_or_scant_file:
+    description: "If dynamic_scan_type is set to \"upload\", then you will need to provide the .scan or .scant file here"
+    required: false
+  scan_type:
+    description: 'Only with dynamic_scan_type: upload. FullScan = continue the Explore stage (adding to any explore data in the uploaded file) and then Test (server default). TestOnly = run only the Test stage on the explore data already in the file - use this to test exactly the Manual Explore / Multi-Step Operations you recorded in AppScan Standard. ReportOnly = import the results in the file without running a scan. Leave empty for the server default.'
+    required: false
+    default: ''
+
+  #DAST starter config
+  starting_URL:
+    description: 'The starting URL of the DAST scan'
+    required: false
+    default: https://demo.testfire.net?mode=demo
+  login_method:
+    description: 'Login Method of the scan, can be none, userpass, or recorded'
+    required: false
+    default: 'none'
+  optimization:
+    description: 'Optimization level: NoOptimization, Fast, Faster, Fastest'
+    required: false
+    default: Fastest
+  
+  #NETWORK
+  network:
+    description: 'Set the type of network, if this is set to private, you must have AppScan Presence created in advance'
+    required: false
+    default: 'public'
+  presence_id:
+    description: 'Provide the appscan presence ID here'
+    required: false
+  ephemeral_presence:
+    description: 'If set to true, this action will deploy a ephemeral (temporary) instance of the AppScan Presence on the runner. Please take note that this will ignore presence_id and network settings, and will force set wait_for_analysis to true. Requires a LINUX runner with Docker (the presence image is a Linux container).'
+    required: false
+    default: 'false'
+  
+  #BASIC LOGIN
+  login_user:
+    description: 'if login_method is userpass, provide the username here'
+    required: false
+  login_password:
+    description: 'if login_method is userpass, provide the password here'
+    required: false
+  #login_extra_field:
+  #  description: 'if login_method is userpass, provide optional 3rd login value'
+  #  required: false
+
+  #RECORDEDLOGIN
+  login_sequence_file:
+    description: 'Provide a path to the Login Traffic File data. Supported file type: CONFIG: AppScan Activity Recorder file'
+    required: false
+    
+  #misc settings
+  email_notification:
+    description: 'Send email notification upon scan completion'
+    required: false
+    default: 'false'
+
+  personal_scan:
+    description: 'set to personal scan'
+    required: false
+    default: 'false'
+  #intervention:
+  #  description: 'allow scan intervention'
+  #  required: false
+  #  default: 'false'
+
+  #Wait for analysis settings
+  wait_for_analysis:
+    description: 'Set this true to wait for analysis to complete before finishing job.'
+    required: true
+    default: 'true'
+
+  wait_for_analysis_timeout_minutes:
+    description: 'maximum duration in minutes before the job will no longer wait and proceeds to complete, default is 360 (6 hours)'
+    required: false
+    default: '360'
+  
+  #fail build settings
+  fail_for_noncompliance:
+    description: 'If **fail_for_noncompliance** = true, fail the job if any non-compliant issues are found in the scan'
+    required: false
+    default: 'false'
+  fail_by_severity:
+    description: 'If **fail_by_severity** is set to true, failure_threshold must also be set. This will fail the job if any issues equal to or higher (more severe) than failure_threshold are found in the scan.'
+    required: false
+    default: 'false'
+  failure_threshold:
+    description: 'If **fail_for_noncompliance** is enabled, the severity that indicates a failure. Lesser severities will not be considered a failure. For example, if failure_threshold is set to Medium, Informational and/or Low severity issues will not cause a failure. Medium, High, and/or Critical issues will cause a failure.	'
+    required: false
+    default: 'High'
+
+outputs:
+  scan_id:
+    description: 'ID of the scan created on the AppScan server.'
+  execution_id:
+    description: 'ID of the scan execution started by this job (set in rescan mode).'
+  scan_url:
+    description: 'Direct link to the scan view in the AppScan portal.'
+  scan_status:
+    description: 'Final scan status observed by the job: Ready, Failed, Stopped, TimedOut (...), or Running when wait_for_analysis=false.'
+  report_file:
+    description: 'Filename (in the job workspace) of the downloaded HTML security report. Only set when wait_for_analysis=true and the scan completes.'
+  total_issues:
+    description: 'Total number of open issues found by the scan.'
+  critical_count:
+    description: 'Number of open Critical severity issues.'
+  high_count:
+    description: 'Number of open High severity issues.'
+  medium_count:
+    description: 'Number of open Medium severity issues.'
+  low_count:
+    description: 'Number of open Low severity issues.'
+  informational_count:
+    description: 'Number of open Informational severity issues.'
+  gate_result:
+    description: 'Security gate verdict: passed, failed, not_configured (no gate inputs enabled), not_evaluated (wait_for_analysis=false), or error (scan failed/timed out).'
+  monitor_matches:
+    description: 'Monitor mode: number of scans that matched the filters.'
+  monitor_report_files:
+    description: 'Monitor mode: space-separated workspace filenames of the downloaded HTML reports (all match the glob AppScan_Monitor_Report-*.html).'
+  monitor_report_files_json:
+    description: 'Monitor mode: the same downloaded report filenames as a JSON array (e.g. ["AppScan_Monitor_Report-...html"]), or [] if none. Feed it to a job matrix via fromJSON() to publish each report as its own artifact.'
+
+runs:
+  using: 'node24'
+  main: 'main.js'
+  post: 'cancelJob.js'
