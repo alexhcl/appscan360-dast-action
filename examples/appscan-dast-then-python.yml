@@ -1,0 +1,101 @@
+# AppScan 360 DAST — run the action's scan first, then the Python client.
+#
+# Flow (one job, steps run in order):
+#   1. The PowerShell ACTION runs a normal DAST scan: it waits for results,
+#      downloads the report, and applies a quality gate (fail on High+).
+#   2. ONCE THAT FINISHES, the standalone Python CLIENT runs — in sync or
+#      async mode (pick from the dropdown). The nightly schedule uses async.
+#
+# NOTE: this performs TWO scans of the application (the action's, then the
+# client's). That's intentional here — the action gives you the gated primary
+# scan, and the client shows the sync/async follow-up. If you only want ONE
+# scan with a hook afterwards, use the action's `post_scan_command` instead.
+#
+# Prereq: copy scripts/appscan_dast.py from the action repo into THIS repo.
+
+name: "AppScan DAST + Python follow-up"
+run-name: "DAST + Python (${{ github.event_name == 'schedule' && 'async' || inputs.python_mode }})"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'            # nightly: action scan + async client follow-up
+  workflow_dispatch:
+    inputs:
+      python_mode:
+        description: 'Python client mode after the scan: sync (wait+gate+report) or async (start and exit)'
+        type: choice
+        options: [sync, async]
+        default: async
+
+concurrency:
+  group: appscan-dast
+  cancel-in-progress: false         # never two of these runs at once
+
+jobs:
+  dast:
+    runs-on: [self-hosted, windows]   # match your runner's labels
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4     # brings scripts/appscan_dast.py into the workspace
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ---- 1) Normal DAST scan via the action (sync: wait + gate + report) ----
+      - name: AppScan 360 DAST (action)
+        id: dast
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"           # TLS skipped by default; set "false" to enforce it
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+          rescan_latest:     true     # first run creates, then rescans
+          wait_for_analysis: true     # sync: block until the scan finishes
+          fail_by_severity:  true     # quality gate
+          failure_threshold: High
+
+      - name: Upload the action's report
+        if: (success() || failure()) && steps.dast.outputs.report_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-action-report-${{ github.run_number }}
+          path: ${{ steps.dast.outputs.report_file }}
+          if-no-files-found: ignore
+
+      # ---- 2) After the scan finishes, run the Python client (sync|async) ----
+      # if: always() so this runs even if the gate above failed the previous step.
+      - name: Python client follow-up
+        id: pyclient
+        if: always()
+        shell: pwsh                   # pwsh, not bash — Windows runners have no bash
+        env:
+          ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
+          ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
+        run: |
+          # Scheduled runs have no inputs -> async follow-up.
+          $mode = if ('${{ github.event_name }}' -eq 'schedule') { 'async' } else { '${{ inputs.python_mode }}' }
+          Write-Host "Python client running in '$mode' mode"
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' `
+            --app-id   '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest `
+            --mode $mode `
+            --fail-on High `
+            --report-file "AppScan_Python_Report-${{ github.run_number }}.html" `
+            --insecure
+          # sync  -> waits, downloads AppScan_Python_Report-*.html, gates on High+
+          #          (exit 1 fails this step/job; 2 scan failed; 3 timeout; 4 API error)
+          # async -> starts the scan and exits 0 immediately; no report, no gate
+
+      # Only sync mode produces a client report (async exits before one exists;
+      # the nightly schedule uses async, so nothing to upload there).
+      - name: Upload the Python client's report
+        if: always() && inputs.python_mode == 'sync'
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-python-report-${{ github.run_number }}
+          path: 'AppScan_Python_Report-*.html'
+          if-no-files-found: ignore

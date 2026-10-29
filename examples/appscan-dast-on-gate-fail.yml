@@ -1,0 +1,106 @@
+# AppScan 360 DAST — run a Python script ONLY when the security gate fails.
+#
+# The action exposes a `gate_result` output (passed / failed / not_configured /
+# not_evaluated / error) and sets it BEFORE it exits, so a later step can react
+# to it. When the gate fails the action step itself fails, which is why the
+# follow-up step needs `if: always()` — without it, a failed previous step
+# makes GitHub skip the step, and nothing runs. That is the usual "it didn't
+# fire" gotcha.
+#
+# Here the follow-up runs the standalone Python client in sync or async mode
+# (dropdown). Prereq: copy scripts/appscan_dast.py into THIS repo.
+
+name: "AppScan DAST — react on gate failure"
+run-name: "DAST (on-fail: ${{ github.event_name == 'schedule' && 'async' || inputs.on_fail_mode }})"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      on_fail_mode:
+        description: 'If the gate FAILS, run the Python client: sync (wait + report) or async (fire-and-forget)'
+        type: choice
+        options: [async, sync]
+        default: async
+
+concurrency:
+  group: appscan-dast
+  cancel-in-progress: false
+
+jobs:
+  dast:
+    runs-on: [self-hosted, windows]   # match your runner's labels
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Gated DAST scan. On High+ findings the gate fails and this step fails,
+      # but it still writes its outputs (gate_result, counts, report_file).
+      - name: AppScan 360 DAST (gated)
+        id: dast
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"           # TLS skipped by default; set "false" to enforce it
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+          rescan_latest:     true
+          wait_for_analysis: true
+          fail_by_severity:  true
+          failure_threshold: High
+
+      - name: Upload report
+        if: (success() || failure()) && steps.dast.outputs.report_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-report-${{ github.run_number }}
+          path: ${{ steps.dast.outputs.report_file }}
+          if-no-files-found: ignore
+
+      # Runs ONLY when the gate failed. `always()` is required: the gate failure
+      # failed the step above, so a plain `if: steps.dast.outputs.gate_result ==
+      # 'failed'` would be skipped. The output is captured even though the step
+      # failed, so this condition still evaluates correctly.
+      - name: On gate failure — run Python client
+        if: always() && steps.dast.outputs.gate_result == 'failed'
+        shell: pwsh                    # pwsh, not bash — Windows runners have no bash
+        env:
+          ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
+          ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
+        run: |
+          # Scheduled runs have no inputs -> async.
+          $mode = if ('${{ github.event_name }}' -eq 'schedule') { 'async' } else { '${{ inputs.on_fail_mode }}' }
+          Write-Host "Security gate FAILED (High+ findings) - running Python client in '$mode' mode"
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' `
+            --app-id   '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest `
+            --mode $mode `
+            --report-file "AppScan_OnFail_Report-${{ github.run_number }}.html" `
+            --insecure
+          # sync  -> waits for the follow-up scan, downloads its report
+          # async -> starts it and returns immediately (scan continues server-side)
+          #
+          # To run your OWN script instead (e.g. a notifier), replace the python
+          # line above with:  python scripts/on_gate_fail.py
+          # It can read the findings from env: $env:ASOC_* are NOT set here (that
+          # is only inside post_scan_command) - pass what you need as arguments,
+          # e.g.  --high '${{ steps.dast.outputs.high_count }}'
+
+      - name: Upload the on-fail report (sync only)
+        if: always() && steps.dast.outputs.gate_result == 'failed' && inputs.on_fail_mode == 'sync'
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-onfail-report-${{ github.run_number }}
+          path: 'AppScan_OnFail_Report-*.html'
+          if-no-files-found: ignore
+
+  # The job is already red because the gated scan step failed on a failed gate.
+  # No extra "enforce" step is needed — the on-fail step running does not turn
+  # the job green.

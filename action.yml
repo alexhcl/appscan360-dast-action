@@ -35,7 +35,7 @@ inputs:
     required: false
     default: false
   post_scan_command:
-    description: 'A command to run after the DAST scan completes and results/gates are evaluated - e.g. a curl webhook call or "python3 scripts/notify.py". Executed via PowerShell on the runner, so shell tools (curl, python3) work as installed there. The scan context is exposed as environment variables: ASOC_SCAN_ID, ASOC_EXECUTION_ID, ASOC_SCAN_URL, ASOC_SCAN_NAME, ASOC_SCAN_STATUS, ASOC_REPORT_FILE, ASOC_TOTAL_ISSUES, ASOC_CRITICAL_COUNT, ASOC_HIGH_COUNT, ASOC_MEDIUM_COUNT, ASOC_LOW_COUNT, ASOC_INFORMATIONAL_COUNT, ASOC_GATE_RESULT, ASOC_BASE_URL, ASOC_APP_ID. Runs whether the gate passed or failed (the job exits after it); a failing command only warns and never changes the gate verdict. Requires wait_for_analysis: true; skipped (with a warning) for async runs, failed scans and timeouts.'
+    description: 'A command to run after the scan - e.g. a curl webhook call or "python scripts/notify.py". Executed via PowerShell on the runner, so shell tools (curl, python) work as installed there. The scan context is exposed as environment variables: ASOC_SCAN_ID, ASOC_EXECUTION_ID, ASOC_SCAN_URL, ASOC_SCAN_NAME, ASOC_SCAN_STATUS, ASOC_REPORT_FILE, ASOC_TOTAL_ISSUES, ASOC_CRITICAL_COUNT, ASOC_HIGH_COUNT, ASOC_MEDIUM_COUNT, ASOC_LOW_COUNT, ASOC_INFORMATIONAL_COUNT, ASOC_GATE_RESULT, ASOC_BASE_URL, ASOC_APP_ID. Runs in BOTH modes: with wait_for_analysis=true after the scan completes and the gate is evaluated (full context, ASOC_SCAN_STATUS=Ready); with wait_for_analysis=false right after the scan is initiated (ASOC_SCAN_STATUS=Running, and the result vars - counts, report file, gate - are empty since no results exist yet). A failing command only warns and never changes the gate verdict. Not run only when a synchronous scan failed or timed out before results.'
     required: false
     default: ''
   scan_history:
@@ -148,7 +148,7 @@ inputs:
     
   #misc settings
   email_notification:
-    description: 'Send email notification upon scan completion'
+    description: 'Have AppScan 360 email a notification on scan completion (sent by the server''s configured SMTP to the scan owner/subscribers; maps to the scan''s EnableMailNotification property). Applies to new scans and to rescans (on a rescan the scan is updated best-effort so the setting takes effect). This is AppScan''s built-in notification - it does not send a custom email; for that, send one yourself from post_scan_command or a workflow step.'
     required: false
     default: 'false'
 

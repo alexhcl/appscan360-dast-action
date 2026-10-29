@@ -4,6 +4,19 @@ This fork addresses the review feedback that the action "only initiates a scan"
 with no status, results, or pipeline gating visible to developers.
 
 ## Recent changes (2026-10-29)
+- **`email_notification` now applies to rescans.** It already set the scan's
+  `EnableMailNotification` when creating a new scan; on a rescan (the
+  per-execution API has no mail flag) the action now updates the scan
+  (best-effort `PUT /Scans/{id}`, `EnableMailNotifications`) before executing,
+  so the input takes effect either way. This toggles AppScan's own
+  server-sent notification - it does not send a custom email.
+- **`post_scan_command` now runs in async mode too.** Previously it ran only
+  when `wait_for_analysis: true` and was skipped (with a warning) on async
+  runs. It now also runs right after the scan is initiated when
+  `wait_for_analysis: false`, so you can notify that a scan started. In async
+  mode `ASOC_SCAN_STATUS=Running`, `ASOC_GATE_RESULT=not_evaluated`, and the
+  result variables (counts, report file) are empty - the scan hasn't finished.
+  The sync and async paths now share one `Invoke-PostScanCommand` helper.
 - **Monitor: report per execution.** Monitor mode now generates and downloads an
   HTML report for **each execution** of the matched scans (verified endpoint
   `POST /api/v4/Reports/Security/ScanExecution/{id}`), shown in the Executions

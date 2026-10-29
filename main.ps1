@@ -161,6 +161,10 @@ if(-not [string]::IsNullOrEmpty($requestedScanId)){
     $null = Run-ASoC-RenameScan $global:scanId $global:scan_name
   }
 
+  #Honor email_notification on rescans: the per-execution API has no mail flag,
+  #so set it on the scan (best-effort) before executing.
+  $null = Run-ASoC-SetScanMailNotification $global:scanId ([System.Convert]::ToBoolean($env:INPUT_EMAIL_NOTIFICATION))
+
   $global:executionId = Run-ASoC-Rescan($global:scanId)
 
   if([string]::IsNullOrEmpty($global:executionId)){
@@ -347,7 +351,6 @@ if($env:INPUT_WAIT_FOR_ANALYSIS -eq $true){
   #whether the gate passed or failed. Full context is exposed as ASOC_* env vars.
   #A failing post-scan command never changes the gate verdict: it only warns.
   if(-not [string]::IsNullOrEmpty($env:INPUT_POST_SCAN_COMMAND)){
-    Write-Host "Running post_scan_command..."
     $env:ASOC_BASE_URL            = $env:INPUT_BASEURL
     $env:ASOC_APP_ID              = $env:INPUT_APPLICATION_ID
     $env:ASOC_SCAN_ID             = $global:scanId
@@ -364,20 +367,7 @@ if($env:INPUT_WAIT_FOR_ANALYSIS -eq $true){
     $env:ASOC_INFORMATIONAL_COUNT = $sevCounts['Informational']
     $env:ASOC_GATE_RESULT         = $gateResult
 
-    $global:LASTEXITCODE = 0
-    try{
-      Invoke-Expression $env:INPUT_POST_SCAN_COMMAND
-      if(($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne 0)){
-        Write-GHWarning "post_scan_command exited with code $LASTEXITCODE. The scan result and gate verdict are unaffected."
-        Add-GHSummary "## :warning: Post-scan command exited with code $LASTEXITCODE`n"
-      } else {
-        Write-Host "post_scan_command completed." -ForegroundColor Green
-        Add-GHSummary "## :outbox_tray: Post-scan command executed`n"
-      }
-    }catch{
-      Write-GHWarning "post_scan_command failed: $($_.Exception.Message). The scan result and gate verdict are unaffected."
-      Add-GHSummary "## :warning: Post-scan command failed: $($_.Exception.Message)`n"
-    }
+    Invoke-PostScanCommand
   }
 
   #Only now does a failed gate end the job
@@ -389,9 +379,31 @@ if($env:INPUT_WAIT_FOR_ANALYSIS -eq $true){
   write-host "Since wait_for_analysis is set to false, the job is now complete. Exiting..."
   Set-GHOutput 'scan_status' 'Running'
   Set-GHOutput 'gate_result' 'not_evaluated'
+
+  #POST-SCAN COMMAND (async): the scan was only initiated, so there are no
+  #results, report or gate yet. The command still runs - useful to notify that
+  #a scan started - with the context known at initiation. Result-related vars
+  #(counts, report, gate) are empty and ASOC_SCAN_STATUS is 'Running'.
   if(-not [string]::IsNullOrEmpty($env:INPUT_POST_SCAN_COMMAND)){
-    Write-GHWarning "post_scan_command is set but wait_for_analysis is false - the command runs only after a completed scan, so it was skipped."
+    $env:ASOC_BASE_URL            = $env:INPUT_BASEURL
+    $env:ASOC_APP_ID              = $env:INPUT_APPLICATION_ID
+    $env:ASOC_SCAN_ID             = $global:scanId
+    $env:ASOC_EXECUTION_ID        = $global:executionId
+    $env:ASOC_SCAN_URL            = $scanOverviewPage
+    $env:ASOC_SCAN_STATUS         = 'Running'
+    $env:ASOC_SCAN_NAME           = $global:scan_name
+    $env:ASOC_REPORT_FILE         = ''
+    $env:ASOC_TOTAL_ISSUES        = ''
+    $env:ASOC_CRITICAL_COUNT      = ''
+    $env:ASOC_HIGH_COUNT          = ''
+    $env:ASOC_MEDIUM_COUNT        = ''
+    $env:ASOC_LOW_COUNT           = ''
+    $env:ASOC_INFORMATIONAL_COUNT = ''
+    $env:ASOC_GATE_RESULT         = 'not_evaluated'
+
+    Invoke-PostScanCommand
   }
+
   Write-GHNotice "wait_for_analysis=false: scan continues on the server. No results or gate are evaluated in this job. Track it here: $scanOverviewPage"
   Add-GHSummary "## :arrows_counterclockwise: Scan running asynchronously`n"
   Add-GHSummary "``wait_for_analysis`` is **false**, so this job only initiated the scan. Results and gates were **not** evaluated. Track progress: $scanOverviewPage`n"

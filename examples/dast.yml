@@ -1,0 +1,97 @@
+# DAST — scan and scan-history browser in one workflow.
+#
+# Replaces .github/workflows/dast.yml in the app repo.
+# The Actions tab keeps a single "DAST" entry; its "Run workflow" form now has
+# a "Monitor only" checkbox plus the history filters. Unticked = normal scan
+# (also what the nightly schedule runs). Ticked = no scan: list past scans in
+# the job summary with Open-scan links, reports attached as a run artifact.
+name: DAST
+run-name: "${{ inputs.monitor == true && 'Scan monitor' || 'DAST scan' }}${{ inputs.name_contains != '' && format(' · name ~ {0}', inputs.name_contains) || '' }}"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'          # nightly scan at 02:00 UTC (never monitor)
+  workflow_dispatch:
+    inputs:
+      monitor:
+        description: 'Monitor only — list past scans instead of scanning'
+        type: boolean
+        required: false
+        default: false
+      rescan_latest:
+        description: 'Rescan the latest scan instead of creating a new one (unticked = new scan)'
+        type: boolean
+        required: false
+        default: true
+      from_date:
+        description: '(monitor) From date, yyyy-MM-dd'
+        required: false
+        default: ''
+      to_date:
+        description: '(monitor) To date, yyyy-MM-dd, inclusive'
+        required: false
+        default: ''
+      scan_id:
+        description: '(monitor) Exact scan ID'
+        required: false
+        default: ''
+      name_contains:
+        description: '(monitor) Scan name contains (case-insensitive)'
+        required: false
+        default: ''
+      max_reports:
+        description: '(monitor) Max HTML reports to download'
+        required: false
+        default: '10'
+
+concurrency:
+  group: appscan-dast
+  cancel-in-progress: false
+
+jobs:
+  dast:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AppScan 360 — ${{ inputs.monitor == true && 'scan monitor' || 'DAST scan' }}
+        id: dast
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"           # TLS skipped by default; set "false" to enforce it
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+
+          # ----- monitor mode (only when the checkbox is ticked) -----
+          # scheduled runs have no inputs -> empty -> false -> normal scan
+          monitor:                ${{ inputs.monitor == true }}
+          monitor_from_date:      ${{ inputs.from_date }}
+          monitor_to_date:        ${{ inputs.to_date }}
+          monitor_scan_id:        ${{ inputs.scan_id }}
+          monitor_name_contains:  ${{ inputs.name_contains }}
+          monitor_max_reports:    ${{ inputs.max_reports || '10' }}
+          monitor_report_per_execution: true   # one report per execution (set false for one per scan)
+
+          # ----- normal scan settings (ignored in monitor mode) -----
+          # Scheduled (nightly) runs have no inputs -> rescan the latest scan.
+          # Manual runs use the "Rescan the latest scan" checkbox (default on).
+          rescan_latest: ${{ github.event_name == 'schedule' || inputs.rescan_latest == true }}
+          dynamic_scan_type: dast
+          starting_URL:   https://demo.testfire.net/
+          wait_for_analysis: true
+          fail_by_severity: true
+          failure_threshold: High
+
+      - name: Attach reports (scan report and/or monitor reports)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-reports-${{ github.run_number }}
+          path: |
+            AppScan_Security_Report-*.html
+            AppScan_Monitor_Report-*.html
+          if-no-files-found: ignore

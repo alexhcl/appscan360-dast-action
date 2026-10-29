@@ -1,0 +1,68 @@
+name: "AppScan Scan Monitor"
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:     { description: 'From date (yyyy-MM-dd)', required: false, default: '' }
+      to_date:       { description: 'To date (yyyy-MM-dd, inclusive)', required: false, default: '' }
+      scan_id:       { description: 'Exact scan ID', required: false, default: '' }
+      name_contains: { description: 'Scan name contains (case-insensitive)', required: false, default: '' }
+      max_reports:   { description: 'Max HTML reports to download (total)', required: false, default: '10' }
+      per_execution: { description: 'One report per execution (default); uncheck for one per scan', required: false, default: true, type: boolean }
+
+jobs:
+  monitor:
+    runs-on: [self-hosted, windows]   # matches your runner; no bash needed anymore
+    outputs:
+      # JSON array of report filenames, emitted directly by the action.
+      reports: ${{ steps.mon.outputs.monitor_report_files_json }}
+    steps:
+      - name: List past AppScan 360 scans
+        id: mon
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"           # TLS skipped by default; set "false" here to enforce it
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+          monitor: true
+          monitor_from_date:     ${{ inputs.from_date }}
+          monitor_to_date:       ${{ inputs.to_date }}
+          monitor_scan_id:       ${{ inputs.scan_id }}
+          monitor_name_contains: ${{ inputs.name_contains }}
+          monitor_max_reports:   ${{ inputs.max_reports }}
+          monitor_report_per_execution: ${{ inputs.per_execution }}
+
+      # One bundle artifact with every report (download once, all inside).
+      - name: Attach all reports (single bundle)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-monitor-reports-${{ github.run_number }}
+          path: 'AppScan_Monitor_Report-*.html'
+          if-no-files-found: ignore
+
+  # Publish EACH report as its own artifact, so every execution's report is
+  # downloadable separately from the run's Artifacts section.
+  split:
+    needs: monitor
+    if: needs.monitor.outputs.reports != '' && needs.monitor.outputs.reports != '[]'
+    runs-on: [self-hosted, windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        report: ${{ fromJSON(needs.monitor.outputs.reports) }}
+    steps:
+      - name: Get the report bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: appscan-monitor-reports-${{ github.run_number }}
+      - name: Publish ${{ matrix.report }} on its own
+        if: matrix.report != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.report }}
+          path: ${{ matrix.report }}
+          if-no-files-found: warn

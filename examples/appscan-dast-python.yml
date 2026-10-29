@@ -1,0 +1,95 @@
+# AppScan 360 DAST via the standalone Python client (scripts/appscan_dast.py).
+#
+# Shows BOTH ways the client can run, chosen by the "mode" dropdown:
+#
+#   sync   Start the scan (or rescan), WAIT until it finishes, print issue
+#          counts, download the HTML report, and FAIL the job on findings at or
+#          above --fail-on. This is a quality gate: a red job = policy breach.
+#
+#   async  Start the scan (or rescan) and EXIT IMMEDIATELY (fire-and-forget).
+#          No waiting, no report, no gate. Collect results later from the
+#          AppScan 360 portal or a monitor run. Use it when you just want to
+#          kick a scan off and not hold a runner for hours.
+#
+# The nightly schedule always runs sync (full gate). Manual runs pick the mode.
+#
+# Prereq: copy scripts/appscan_dast.py from the action repo into THIS repo
+# (e.g. to scripts/appscan_dast.py), so actions/checkout makes it available.
+
+name: "AppScan DAST (Python client)"
+run-name: "AppScan DAST · ${{ github.event_name == 'schedule' && 'sync' || inputs.mode }}"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'            # nightly, always sync
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'sync = wait + gate + report · async = start and exit'
+        type: choice
+        options: [sync, async]
+        default: sync
+      fail_on:
+        description: '(sync) fail the job on open issues at/above this severity'
+        type: choice
+        options: [Critical, High, Medium, Low, Informational]
+        default: High
+
+concurrency:
+  group: appscan-dast-python
+  cancel-in-progress: false
+
+jobs:
+  dast:
+    runs-on: [self-hosted, windows]   # match your runner's labels
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4     # brings scripts/appscan_dast.py into the workspace
+
+      # A self-hosted runner running as a Windows service often has no usable
+      # Python on the service account's PATH; setup-python provides one.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: AppScan 360 DAST
+        id: scan
+        shell: pwsh                   # pwsh (not bash) — Windows runners have no bash
+        env:
+          ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
+          ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
+        run: |
+          # Scheduled runs have no inputs -> force sync + High gate.
+          $mode   = if ('${{ github.event_name }}' -eq 'schedule') { 'sync' } else { '${{ inputs.mode }}' }
+          $failOn = if ('${{ github.event_name }}' -eq 'schedule') { 'High' } else { '${{ inputs.fail_on }}' }
+
+          Write-Host "Running Python client in '$mode' mode (fail-on: $failOn)"
+
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' `
+            --app-id   '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest `
+            --mode $mode `
+            --fail-on $failOn `
+            --report-file "AppScan_Security_Report-${{ github.run_number }}.html" `
+            --insecure
+          # --insecure = client equivalent of ACCEPTSSL (skip TLS verification).
+          # For a brand-new scan instead of a rescan, drop --rescan-latest and
+          # add:  --starting-url 'https://staging.yourapp.com'
+          #
+          # The client's exit code becomes this step's result:
+          #   0  ok      (async: started · sync: scan Ready and gate passed)
+          #   1  gate failed  (open issues at/above --fail-on)   <- job goes red
+          #   2  scan Failed/Stopped on the server
+          #   3  timeout waiting for the scan (sync)
+          #   4  API / connection error
+          # pwsh fails the step on a non-zero exit, so the gate works with no extra wiring.
+
+      # Only sync produces a report; async exits before one exists.
+      - name: Upload security report
+        if: (success() || failure()) && (github.event_name == 'schedule' || inputs.mode == 'sync')
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-report-${{ github.run_number }}
+          path: 'AppScan_Security_Report-*.html'
+          if-no-files-found: ignore

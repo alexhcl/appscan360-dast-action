@@ -47,6 +47,28 @@ Write-Host "Loading Library functions from asoc.ps1"
 #Load GitHub Actions helper functions (job summary, outputs, annotations)
 . "$env:GITHUB_ACTION_PATH/github.ps1"
 
+function Invoke-PostScanCommand {
+  #Runs post_scan_command (if set) with whatever ASOC_* context the caller has
+  #already exported. Shared by the sync path (full results) and the async path
+  #(IDs/URL only). A failing command only warns - it never changes the gate.
+  if([string]::IsNullOrEmpty($env:INPUT_POST_SCAN_COMMAND)){ return }
+  Write-Host "Running post_scan_command..."
+  $global:LASTEXITCODE = 0
+  try{
+    Invoke-Expression $env:INPUT_POST_SCAN_COMMAND
+    if(($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne 0)){
+      Write-GHWarning "post_scan_command exited with code $LASTEXITCODE. The scan result and gate verdict are unaffected."
+      Add-GHSummary "## :warning: Post-scan command exited with code $LASTEXITCODE`n"
+    } else {
+      Write-Host "post_scan_command completed." -ForegroundColor Green
+      Add-GHSummary "## :outbox_tray: Post-scan command executed`n"
+    }
+  }catch{
+    Write-GHWarning "post_scan_command failed: $($_.Exception.Message). The scan result and gate verdict are unaffected."
+    Add-GHSummary "## :warning: Post-scan command failed: $($_.Exception.Message)`n"
+  }
+}
+
 #FUNCTIONS
 function Login-ASoC {
   param([switch]$SoftFail)
@@ -561,6 +583,35 @@ function Run-ASoC-GetLatestScanIdForApp($appId){
   }
   Write-Host ("Latest scan for application {0}: '{1}' (ID: {2}, created {3})" -f $appId, $latest.Name, $latest.Id, $latest.CreatedAt)
   return $latest.Id
+}
+
+function Run-ASoC-SetScanMailNotification($scanId, $enabled){
+
+  #Best-effort: set the scan's EnableMailNotifications flag so RESCANS honor the
+  #email_notification input (the per-execution API has no mail flag - it is a
+  #property of the scan). Uses PUT /Scans/{id} (UpdateScanWithPresenceAndRecurrence,
+  #field 'EnableMailNotifications', plural). A server that declines only warns.
+  $params = @{
+    Uri         = "$global:BaseAPIUrl/Scans/$scanId"
+    Method      = 'PUT'
+    Headers = @{
+      'Content-Type' = 'application/json'
+      Authorization = "Bearer $global:BearerToken"
+    }
+  }
+  $body = @{ EnableMailNotifications = [bool]$enabled }
+  try{
+    if ($global:SkipCert) {
+      Invoke-RestMethod @params -Body ($body|ConvertTo-Json) -SkipCertificateCheck | Out-Null
+    } else {
+      Invoke-RestMethod @params -Body ($body|ConvertTo-Json) | Out-Null
+    }
+    Write-Host ("Email notification for rescan set to: {0}" -f $enabled)
+    return $true
+  }catch{
+    Write-GHWarning "email_notification: the server declined updating mail notification on scan $scanId ($($_.Exception.Message)). The rescan keeps the scan's stored setting."
+    return $false
+  }
 }
 
 function Run-ASoC-RenameScan($scanId, $newName){

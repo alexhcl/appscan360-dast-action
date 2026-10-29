@@ -279,11 +279,11 @@ Once both files are on the default branch, the Actions sidebar shows **DAST** an
 |---|---|---|
 | `wait_for_analysis` | `true` | `true` → wait, download the report, write the findings summary, evaluate gates. `false` → initiate only (no results, no gate; `gate_result: not_evaluated`). |
 | `wait_for_analysis_timeout_minutes` | `360` | Max wait. **Exceeding it fails the job** (the scan keeps running on the server; link provided). |
-| `post_scan_command` | — | Command to run **after** the scan completes and gates are evaluated — see [Post-scan custom script](#post-scan-custom-script). |
+| `post_scan_command` | — | Command to run after the scan — after results/gate in sync mode, right after initiation in async mode — see [Post-scan custom script](#post-scan-custom-script). |
 | `github_token` | workflow token | Used by the action's post step to list this run's artifacts and append a **Downloads** section with direct artifact links to the summary (needs `actions: read`). Empty string disables it. |
 | `scan_history` | `true` | Append a compact **Scan history** section (past scans + portal links, current run marked) to every scanning run's job summary. Set `false` to disable. |
 | `scan_history_limit` | `15` | Max rows in the Scan history section. |
-| `email_notification` | `false` | Server-side completion email. |
+| `email_notification` | `false` | AppScan's built-in completion email (sent by the server's SMTP to the scan owner/subscribers; sets the scan's `EnableMailNotification`). Applies to new scans **and rescans**. Not a custom email — for that, send one yourself from `post_scan_command` or a workflow step. |
 | `personal_scan` | `false` | Mark as a personal scan. |
 
 ### Security gates
@@ -328,18 +328,22 @@ If no gate is enabled, the job passes regardless of findings — the action emit
 
 ## Post-scan custom script
 
-`post_scan_command` runs **after** the scan completes and the gates are evaluated — **whether the gate passed or failed** (the job exits afterward), so notifications fire on red runs too. A failing command only emits a warning; it never changes the gate verdict. It is executed by PowerShell on the runner, so any installed tool works (`curl`, `python3`, …). Requires `wait_for_analysis: true`; skipped with a warning on async runs; not run when the scan itself fails or times out (for that, use a separate step with `if: always()` reading the outputs).
+`post_scan_command` runs in **both modes**, and a failing command only emits a warning — it never changes the gate verdict. It is executed by PowerShell on the runner, so any installed tool works (`curl`, `python`, …).
 
-The full scan context is exported as environment variables:
+- **Sync (`wait_for_analysis: true`)** — runs **after** the scan completes and the gate is evaluated, **whether the gate passed or failed** (the job exits afterward), so notifications fire on red runs too. Full context is available (`ASOC_SCAN_STATUS=Ready`, counts, report file, gate result). Not run if the scan itself failed or timed out before results.
+- **Async (`wait_for_analysis: false`)** — runs **right after the scan is initiated**, so you can notify that a scan started. The scan isn't finished, so `ASOC_SCAN_STATUS=Running` and the **result variables are empty** (no counts, no report, `ASOC_GATE_RESULT=not_evaluated`); the IDs, URL and name are set.
 
-| Variable | Value |
-|---|---|
-| `ASOC_SCAN_ID` / `ASOC_EXECUTION_ID` | Scan and (rescans) execution IDs |
-| `ASOC_SCAN_URL` / `ASOC_SCAN_NAME` / `ASOC_SCAN_STATUS` | Portal link, name, final status |
-| `ASOC_REPORT_FILE` | HTML report filename in the workspace |
-| `ASOC_TOTAL_ISSUES`, `ASOC_CRITICAL_COUNT`, `ASOC_HIGH_COUNT`, `ASOC_MEDIUM_COUNT`, `ASOC_LOW_COUNT`, `ASOC_INFORMATIONAL_COUNT` | Open-issue counts |
-| `ASOC_GATE_RESULT` | `passed` / `failed` / `not_configured` |
-| `ASOC_BASE_URL` / `ASOC_APP_ID` | For follow-up API calls |
+The scan context is exported as environment variables:
+
+| Variable | Value | Async |
+|---|---|---|
+| `ASOC_SCAN_ID` / `ASOC_EXECUTION_ID` | Scan and (rescans) execution IDs | set |
+| `ASOC_SCAN_URL` / `ASOC_SCAN_NAME` | Portal link, scan name | set |
+| `ASOC_SCAN_STATUS` | `Ready` (sync) or `Running` (async) | `Running` |
+| `ASOC_REPORT_FILE` | HTML report filename in the workspace | empty |
+| `ASOC_TOTAL_ISSUES`, `ASOC_CRITICAL_COUNT`, `ASOC_HIGH_COUNT`, `ASOC_MEDIUM_COUNT`, `ASOC_LOW_COUNT`, `ASOC_INFORMATIONAL_COUNT` | Open-issue counts | empty |
+| `ASOC_GATE_RESULT` | `passed` / `failed` / `not_configured` | `not_evaluated` |
+| `ASOC_BASE_URL` / `ASOC_APP_ID` | For follow-up API calls | set |
 
 Inline webhook (note the PowerShell `$env:` syntax in inline commands):
 
@@ -472,7 +476,7 @@ jobs:
 
 ## Sample workflow — scan monitor button
 
-The monitor button workflow is shown in full in the [Quick start](#quick-start--simple-dast-scan--monitor-button) above, and ships in this repo as [`examples-appscan-monitor.yml`](examples-appscan-monitor.yml) — copy it to `.github/workflows/appscan-monitor.yml` in your application repo. Optional README badge for one-click access:
+The monitor button workflow is shown in full in the [Quick start](#quick-start--simple-dast-scan--monitor-button) above, and ships in this repo as [`examples/appscan-monitor.yml`](examples/appscan-monitor.yml) — copy it to `.github/workflows/appscan-monitor.yml` in your application repo. Optional README badge for one-click access:
 
 ```markdown
 [![AppScan scan monitor](https://img.shields.io/badge/AppScan-scan_monitor-2F5BEA)](https://github.com/<org>/<repo>/actions/workflows/appscan-monitor.yml)
@@ -605,6 +609,150 @@ jobs:
 | Use it for | CI gates, nightly scans you act on | fire-and-forget kick-offs; collect later via monitor/portal |
 
 For a brand-new scan instead of a rescan, drop `--rescan-latest` and add `--starting-url 'https://staging.yourapp.com'`. `--insecure` is the client's equivalent of `ACCEPTSSL` (skip TLS verification until the server CA is trusted).
+
+### Action scan first, then the Python client
+
+To run a normal gated DAST scan with the **action**, and **once it finishes** run the **Python client** (sync or async, chosen from a dropdown), put both in one job — steps run in order, so the client always starts after the action's scan completes. The nightly schedule uses an async follow-up.
+
+```yaml
+name: "AppScan DAST + Python follow-up"
+run-name: "DAST + Python (${{ github.event_name == 'schedule' && 'async' || inputs.python_mode }})"
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      python_mode:
+        description: 'Python client mode after the scan: sync (wait+gate+report) or async (start and exit)'
+        type: choice
+        options: [sync, async]
+        default: async
+
+concurrency:
+  group: appscan-dast
+  cancel-in-progress: false
+
+jobs:
+  dast:
+    runs-on: [self-hosted, windows]   # match your runner's labels
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 1) Normal DAST scan via the action (sync: wait + gate + report)
+      - name: AppScan 360 DAST (action)
+        id: dast
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+          rescan_latest:     true
+          wait_for_analysis: true
+          fail_by_severity:  true
+          failure_threshold: High
+
+      - name: Upload the action's report
+        if: (success() || failure()) && steps.dast.outputs.report_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-action-report-${{ github.run_number }}
+          path: ${{ steps.dast.outputs.report_file }}
+          if-no-files-found: ignore
+
+      # 2) After the scan finishes, run the Python client (sync|async)
+      - name: Python client follow-up
+        if: always()                  # run even if the gate above failed the job
+        shell: pwsh                    # pwsh, not bash — Windows runners have no bash
+        env:
+          ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
+          ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
+        run: |
+          $mode = if ('${{ github.event_name }}' -eq 'schedule') { 'async' } else { '${{ inputs.python_mode }}' }
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' `
+            --app-id   '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest --mode $mode --fail-on High `
+            --report-file "AppScan_Python_Report-${{ github.run_number }}.html" `
+            --insecure
+
+      - name: Upload the Python client's report
+        if: always() && inputs.python_mode == 'sync'   # async produces no report
+        uses: actions/upload-artifact@v4
+        with:
+          name: appscan-python-report-${{ github.run_number }}
+          path: 'AppScan_Python_Report-*.html'
+          if-no-files-found: ignore
+```
+
+> This runs **two scans** of the application — the action's, then the client's. That's the point of chaining them here (gated primary scan, then a sync/async follow-up). If you only want **one** scan with something run afterwards, use the action's `post_scan_command` instead of a second tool.
+
+### Run a script only when the gate fails
+
+The action sets the `gate_result` output (`passed` / `failed` / `not_configured` / `not_evaluated` / `error`) **before** it exits, so you can trigger a follow-up step only on a failed gate. The gate failure makes the action step fail, so the follow-up step **must use `if: always()`** — otherwise GitHub skips it because a previous step failed. The output is still captured, so the condition evaluates correctly.
+
+```yaml
+      - name: AppScan 360 DAST (gated)
+        id: dast
+        uses: alexhcl/appscan360-dast-action@main
+        env:
+          ACCEPTSSL: "true"
+        with:
+          baseurl:        ${{ vars.APPSCAN_URL }}
+          asoc_key:       ${{ secrets.APPSCAN_KEY }}
+          asoc_secret:    ${{ secrets.APPSCAN_SECRET }}
+          application_id: ${{ vars.APPSCAN_APP_ID }}
+          rescan_latest:     true
+          wait_for_analysis: true
+          fail_by_severity:  true
+          failure_threshold: High
+
+      # Runs ONLY on a failed gate. always() is required (the step above failed).
+      - name: On gate failure — run the Python client (sync or async)
+        if: always() && steps.dast.outputs.gate_result == 'failed'
+        shell: pwsh
+        env:
+          ASOC_KEY_ID:     ${{ secrets.APPSCAN_KEY }}
+          ASOC_KEY_SECRET: ${{ secrets.APPSCAN_SECRET }}
+        run: |
+          $mode = '${{ inputs.on_fail_mode }}'        # 'sync' or 'async'
+          python scripts/appscan_dast.py `
+            --base-url '${{ vars.APPSCAN_URL }}' --app-id '${{ vars.APPSCAN_APP_ID }}' `
+            --rescan-latest --mode $mode `
+            --report-file "AppScan_OnFail_Report-${{ github.run_number }}.html" --insecure
+```
+
+- **sync** → the step waits for the follow-up scan and downloads its report; **async** → it starts the scan and returns immediately (the scan continues on the server).
+- To run **your own** script instead (e.g. a notifier), swap the `python` line for `python scripts/on_gate_fail.py`. `ASOC_*` env vars are **not** set in this step (those exist only inside `post_scan_command`) — pass what it needs as arguments, e.g. `--high '${{ steps.dast.outputs.high_count }}'`.
+- The job is already red because the gated scan step failed; the on-fail step running does not turn it green.
+
+**Alternative — inside `post_scan_command`.** If you'd rather keep it in the action (no extra workflow step), `post_scan_command` runs on every completed scan and exposes `ASOC_GATE_RESULT`, so branch on it:
+
+```yaml
+          post_scan_command: >-
+            pwsh -c "if ($env:ASOC_GATE_RESULT -eq 'failed') { python scripts/on_gate_fail.py --high $env:ASOC_HIGH_COUNT }"
+```
+
+A full ready-to-use workflow for the first pattern ships as [`examples/appscan-dast-on-gate-fail.yml`](examples/appscan-dast-on-gate-fail.yml).
+
+## Example workflows
+
+Ready-to-copy workflows live in [`examples/`](examples/) — drop one into `.github/workflows/` in your application repo and adjust `runs-on` labels / inputs:
+
+| File | What it does |
+|---|---|
+| [`examples/dast.yml`](examples/dast.yml) | DAST scan + scan-history/monitor in one workflow, with a "Monitor only" and "Rescan latest" toggle. |
+| [`examples/appscan-monitor.yml`](examples/appscan-monitor.yml) | Separate monitor button: lists past scans, downloads reports, and publishes **each report as its own artifact**. |
+| [`examples/appscan-dast-python.yml`](examples/appscan-dast-python.yml) | The standalone Python client in **sync or async** mode (dropdown). |
+| [`examples/appscan-dast-then-python.yml`](examples/appscan-dast-then-python.yml) | Action scan first, then the Python client (sync/async) once it finishes. |
+| [`examples/appscan-dast-on-gate-fail.yml`](examples/appscan-dast-on-gate-fail.yml) | Run the Python client (sync/async) **only when the security gate fails**. |
 
 ## Troubleshooting
 
